@@ -19,7 +19,11 @@ class SchemeBase(BaseModel):
     tags: Optional[List[str]] = []
     briefDescription: Optional[str] = None
     deep_details: Optional[DeepDetails] = None
-
+    
+    # FIX 4: Aligned with the database model (String, not List)
+    schemeFor: Optional[str] = None 
+    schemeCloseDate: Optional[str] = None
+    
 # 3. The schema used when returning data to the frontend
 class SchemeResponse(SchemeBase):
     
