@@ -50,29 +50,49 @@ def generate_agent_response(user_query: str, retrieved_schemes: list):
 
     prompt = f"Context:\n{context_text}\n\nUser Query: {user_query}"
 
-    # 3. Call Claude 3 Haiku
-    try:
-        body = json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 500,
-            "system": system_prompt,
-            "messages": [{"role": "user", "content": prompt}]
-        })
+    # # 3. Call Claude 3 Haiku
+    # try:
+    #     body = json.dumps({
+    #         "anthropic_version": "bedrock-2023-05-31",
+    #         "max_tokens": 500,
+    #         "system": system_prompt,
+    #         "messages": [{"role": "user", "content": prompt}]
+    #     })
 
-        # response = bedrock.invoke_model(
-        #     modelId='anthropic.claude-3-haiku-20240307-v1:0', 
-        #     body=body
-        # )
+    #     # response = bedrock.invoke_model(
+    #     #     modelId='anthropic.claude-3-haiku-20240307-v1:0', 
+    #     #     body=body
+    #     # )
         
-        response = bedrock.invoke_model(
-            modelId='amazon.titan-text-express-v1', 
-            accept='application/json',
-            contentType='application/json',
-            body=body
+    #     response = bedrock.invoke_model(
+    #         modelId='amazon.titan-text-express-v1', 
+    #         accept='application/json',
+    #         contentType='application/json',
+    #         body=body
+    #     )
+        
+    #     result = json.loads(response.get('body').read())
+    #     return result['content'][0]['text']
+    
+    
+    # 3. Call Amazon Nova Lite using the modern Converse API
+    try:
+        response = bedrock.converse(
+            # CHANGE THIS LINE: Add 'us.' to the front of the model ID
+            modelId='apac.amazon.nova-lite-v1:0', 
+            messages=[{
+                "role": "user",
+                "content": [{"text": prompt}]
+            }],
+            system=[{"text": system_prompt}],
+            inferenceConfig={
+                "maxTokens": 500,
+                "temperature": 0.2
+            }
         )
         
-        result = json.loads(response.get('body').read())
-        return result['content'][0]['text']
+        return response['output']['message']['content'][0]['text']
+    
     except Exception as e:
         print(f"Error generating agent response: {e}")
         return "I'm sorry, I am having trouble connecting to the AI brain right now."
