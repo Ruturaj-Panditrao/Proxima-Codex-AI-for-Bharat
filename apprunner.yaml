@@ -4,8 +4,8 @@ runtime: python311
 build:
   commands:
     build:
-      - pip3 install --upgrade pip
-      - pip3 install -r stream/requirements.txt
+      - python3 -m pip install --upgrade pip
+      - python3 -m pip install -r stream/requirements.txt
 
 run:
   command: python3 -m uvicorn stream.app:app --host 0.0.0.0 --port 8080
