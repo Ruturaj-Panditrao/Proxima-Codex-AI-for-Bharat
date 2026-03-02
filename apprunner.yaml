@@ -9,7 +9,6 @@ build:
 
 run:
   runtime-version: 3.11
-  working-directory: stream
-  command: python3 -m uvicorn app:app --host 0.0.0.0 --port 8080
+  command: cd stream && python3 -m uvicorn app:app --host 0.0.0.0 --port 8080
   network:
     port: 8080
