@@ -1,18 +1,18 @@
-import re
-from typing import Dict, List, Optional
+import os
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Scheme
-from app.schemas import SchemeResponse
-from app.services import generate_agent_response, get_query_embedding
+from app.models import AgentSession, AgentTurn, Scheme
+from app.services import analyze_turn_for_followup, generate_agent_response, get_query_embedding
 
 
 router = APIRouter(prefix="/api/agent", tags=["Voice Agent"])
+AGENT_ENABLE_FOLLOW_UP = os.getenv("AGENT_ENABLE_FOLLOW_UP", "true").lower() == "true"
 
 
 class AgentTurnRequest(BaseModel):
@@ -29,6 +29,14 @@ class SlotState(BaseModel):
     occupation: Optional[str] = None
 
 
+class RecommendedScheme(BaseModel):
+    slug: str
+    schemeName: str
+    briefDescription: Optional[str] = None
+    beneficiaryState: Optional[List[str]] = None
+    schemeCategory: Optional[List[str]] = None
+
+
 class AgentTurnResponse(BaseModel):
     session_id: str
     status: str
@@ -37,127 +45,21 @@ class AgentTurnResponse(BaseModel):
     followup_question: Optional[str] = None
     missing_fields: List[str] = []
     collected_slots: SlotState
-    referenced_schemes: List[SchemeResponse] = []
+    referenced_schemes: List[RecommendedScheme] = []
 
 
-class SessionState(BaseModel):
-    slots: SlotState = SlotState()
+class TurnHistoryItem(BaseModel):
+    role: str
+    message_text: str
+    meta: Dict[str, Any] = {}
+    created_at: Optional[str] = None
+
+
+class SessionHistoryResponse(BaseModel):
+    session_id: str
     language_code: Optional[str] = None
-    last_user_text: str = ""
-
-
-# In-memory conversation state (replace with Redis/DB in production multi-instance setups)
-SESSION_STORE: Dict[str, SessionState] = {}
-
-INDIAN_STATES = {
-    "andhra pradesh",
-    "arunachal pradesh",
-    "assam",
-    "bihar",
-    "chhattisgarh",
-    "goa",
-    "gujarat",
-    "haryana",
-    "himachal pradesh",
-    "jharkhand",
-    "karnataka",
-    "kerala",
-    "madhya pradesh",
-    "maharashtra",
-    "manipur",
-    "meghalaya",
-    "mizoram",
-    "nagaland",
-    "odisha",
-    "punjab",
-    "rajasthan",
-    "sikkim",
-    "tamil nadu",
-    "telangana",
-    "tripura",
-    "uttar pradesh",
-    "uttarakhand",
-    "west bengal",
-    "delhi",
-    "jammu and kashmir",
-    "ladakh",
-    "puducherry",
-    "chandigarh",
-    "andaman and nicobar islands",
-    "dadra and nagar haveli and daman and diu",
-    "lakshadweep",
-}
-
-
-def _extract_slots(text: str, current_slots: SlotState) -> SlotState:
-    normalized = text.strip().lower()
-    slots = current_slots.model_copy(deep=True)
-
-    for st in INDIAN_STATES:
-        if st in normalized:
-            slots.state = st.title()
-            break
-
-    age_match = re.search(r"\b(?:age\s*is\s*|i am\s*|i'm\s*)(\d{1,2})\b", normalized)
-    if age_match:
-        slots.age = int(age_match.group(1))
-
-    income_match = re.search(r"\b(?:income|salary|monthly income)\D{0,10}(\d{4,7})\b", normalized)
-    if income_match:
-        slots.income_monthly = int(income_match.group(1))
-
-    if re.search(r"\b(male|man|boy)\b", normalized):
-        slots.gender = "male"
-    elif re.search(r"\b(female|woman|girl)\b", normalized):
-        slots.gender = "female"
-    elif re.search(r"\b(transgender)\b", normalized):
-        slots.gender = "transgender"
-
-    if re.search(r"\b(farmer|agri)\b", normalized):
-        slots.occupation = "farmer"
-    elif re.search(r"\b(student)\b", normalized):
-        slots.occupation = "student"
-    elif re.search(r"\b(worker|labour|labor)\b", normalized):
-        slots.occupation = "worker"
-    elif re.search(r"\b(women entrepreneur|entrepreneur|business)\b", normalized):
-        slots.occupation = "entrepreneur"
-
-    return slots
-
-
-def _missing_fields(slots: SlotState) -> List[str]:
-    required = ["state", "occupation"]
-    missing: List[str] = []
-    for field_name in required:
-        if not getattr(slots, field_name):
-            missing.append(field_name)
-    return missing
-
-
-def _followup_for_field(field_name: str) -> str:
-    if field_name == "state":
-        return "Which state do you live in?"
-    if field_name == "occupation":
-        return "Are you a student, farmer, worker, entrepreneur, or something else?"
-    return "Could you share a bit more detail so I can suggest the best scheme?"
-
-
-def _build_query_text(user_text: str, slots: SlotState) -> str:
-    profile_parts = []
-    if slots.state:
-        profile_parts.append(f"State: {slots.state}")
-    if slots.occupation:
-        profile_parts.append(f"Occupation: {slots.occupation}")
-    if slots.gender:
-        profile_parts.append(f"Gender: {slots.gender}")
-    if slots.age is not None:
-        profile_parts.append(f"Age: {slots.age}")
-    if slots.income_monthly is not None:
-        profile_parts.append(f"Monthly income: {slots.income_monthly}")
-
-    if not profile_parts:
-        return user_text
-    return f"{user_text}. User profile - " + ", ".join(profile_parts)
+    slots: SlotState
+    turns: List[TurnHistoryItem]
 
 
 def _retrieve_recommendations(db: Session, query_text: str, state: Optional[str]) -> List[Scheme]:
@@ -170,78 +72,218 @@ def _retrieve_recommendations(db: Session, query_text: str, state: Optional[str]
     if query_vector:
         return base_query.order_by(Scheme.embedding.l2_distance(query_vector)).limit(3).all()
 
-    # Fallback if embedding service fails
     return base_query.filter(Scheme.schemeName.ilike("%yojana%")).limit(3).all()
+
+
+def _load_slots_from_session(session_row: AgentSession) -> SlotState:
+    slot_data = session_row.slots if isinstance(session_row.slots, dict) else {}
+    return SlotState(**slot_data)
+
+
+def _merge_slots(old_slots: SlotState, updates: dict) -> SlotState:
+    data = old_slots.model_dump()
+    for key in ["state", "age", "gender", "income_monthly", "occupation"]:
+        value = updates.get(key)
+        if value is not None and value != "":
+            data[key] = value
+    return SlotState(**data)
+
+
+def _upsert_session(db: Session, session_id: Optional[str], detected_language_code: Optional[str]) -> tuple[str, AgentSession, SlotState]:
+    sid = session_id or uuid4().hex
+    session_row = db.query(AgentSession).filter(AgentSession.session_id == sid).first()
+
+    if not session_row:
+        session_row = AgentSession(
+            session_id=sid,
+            language_code=detected_language_code if detected_language_code and detected_language_code != "unknown" else None,
+            slots={},
+        )
+        db.add(session_row)
+        db.flush()
+
+    if detected_language_code and detected_language_code != "unknown":
+        session_row.language_code = detected_language_code
+
+    return sid, session_row, _load_slots_from_session(session_row)
+
+
+def _persist_turn(db: Session, session_id: str, role: str, message_text: str, meta: Optional[Dict[str, Any]] = None) -> None:
+    db.add(
+        AgentTurn(
+            session_id=session_id,
+            role=role,
+            message_text=message_text,
+            meta=meta or {},
+        )
+    )
+
+
+def _serialize_scheme(scheme: Scheme) -> RecommendedScheme:
+    return RecommendedScheme(
+        slug=scheme.slug,
+        schemeName=scheme.schemeName,
+        briefDescription=scheme.briefDescription,
+        beneficiaryState=scheme.beneficiaryState,
+        schemeCategory=scheme.schemeCategory,
+    )
 
 
 @router.post("/voice-turn", response_model=AgentTurnResponse)
 def agent_voice_turn(request: AgentTurnRequest, db: Session = Depends(get_db)):
-    session_id = request.session_id or uuid4().hex
-    session_state = SESSION_STORE.get(session_id, SessionState())
+    sid, session_row, current_slots = _upsert_session(db, request.session_id, request.detected_language_code)
 
-    session_state.language_code = request.detected_language_code or session_state.language_code
-    session_state.last_user_text = request.user_text
-    session_state.slots = _extract_slots(request.user_text, session_state.slots)
+    _persist_turn(
+        db,
+        sid,
+        role="user",
+        message_text=request.user_text,
+        meta={"detected_language_code": request.detected_language_code or "unknown"},
+    )
 
-    missing = _missing_fields(session_state.slots)
+    recent_turns = (
+        db.query(AgentTurn)
+        .filter(AgentTurn.session_id == sid)
+        .order_by(AgentTurn.id.desc())
+        .limit(8)
+        .all()
+    )
+    recent_turns.reverse()
 
-    if missing:
-        question = _followup_for_field(missing[0])
-        SESSION_STORE[session_id] = session_state
+    decision = analyze_turn_for_followup(
+        user_text=request.user_text,
+        history_turns=[{"role": t.role, "message_text": t.message_text} for t in recent_turns],
+        detected_language_code=request.detected_language_code,
+    )
+
+    merged_slots = _merge_slots(current_slots, decision.get("slots", {}))
+    session_row.slots = merged_slots.model_dump()
+
+    should_follow = AGENT_ENABLE_FOLLOW_UP and bool(decision.get("should_follow_up", False))
+    follow_up_question = (decision.get("follow_up_question") or "").strip()
+
+    if should_follow and follow_up_question:
+        _persist_turn(
+            db,
+            sid,
+            role="agent",
+            message_text=follow_up_question,
+            meta={"status": "need_more_info", "source": "llm_decision"},
+        )
+        db.commit()
         return AgentTurnResponse(
-            session_id=session_id,
+            session_id=sid,
             status="need_more_info",
-            reply_text=question,
+            reply_text=follow_up_question,
             should_ask_followup=True,
-            followup_question=question,
-            missing_fields=missing,
-            collected_slots=session_state.slots,
+            followup_question=follow_up_question,
+            missing_fields=[],
+            collected_slots=merged_slots,
             referenced_schemes=[],
         )
 
-    query_text = _build_query_text(request.user_text, session_state.slots)
-    schemes = _retrieve_recommendations(db, query_text, session_state.slots.state)
+    search_query = (decision.get("search_query") or request.user_text).strip()
+    state_filter = decision.get("state_filter") or merged_slots.state
 
-    if not schemes:
+    schemes = _retrieve_recommendations(db, search_query, state_filter)
+    scheme_cards = [_serialize_scheme(s) for s in schemes]
+
+    if not scheme_cards:
         reply = "I could not find a strong scheme match yet. Please tell me your exact need, like scholarship, farming subsidy, or business loan."
-        SESSION_STORE[session_id] = session_state
+        _persist_turn(
+            db,
+            sid,
+            role="agent",
+            message_text=reply,
+            meta={"status": "no_match", "source": "retrieval"},
+        )
+        db.commit()
         return AgentTurnResponse(
-            session_id=session_id,
+            session_id=sid,
             status="no_match",
             reply_text=reply,
             should_ask_followup=True,
             followup_question=reply,
             missing_fields=[],
-            collected_slots=session_state.slots,
+            collected_slots=merged_slots,
             referenced_schemes=[],
         )
 
     agent_prompt = (
         f"{request.user_text}\n"
-        "Use this collected profile while answering:\n"
-        f"- State: {session_state.slots.state}\n"
-        f"- Occupation: {session_state.slots.occupation}\n"
-        f"- Age: {session_state.slots.age}\n"
-        f"- Gender: {session_state.slots.gender}\n"
-        f"- Monthly income: {session_state.slots.income_monthly}\n"
-        "Give concise recommendation and ask if user wants next best option."
+        "Use this profile while answering:\n"
+        f"- State: {merged_slots.state}\n"
+        f"- Occupation: {merged_slots.occupation}\n"
+        f"- Age: {merged_slots.age}\n"
+        f"- Gender: {merged_slots.gender}\n"
+        f"- Monthly income: {merged_slots.income_monthly}\n"
+        "Be concise. If useful, ask one optional next question at the end."
     )
     answer = generate_agent_response(agent_prompt, schemes)
-    SESSION_STORE[session_id] = session_state
+
+    _persist_turn(
+        db,
+        sid,
+        role="agent",
+        message_text=answer,
+        meta={
+            "status": "complete",
+            "source": "retrieval+llm",
+            "top_schemes": ", ".join([s.schemeName for s in scheme_cards]),
+        },
+    )
+    db.commit()
 
     return AgentTurnResponse(
-        session_id=session_id,
+        session_id=sid,
         status="complete",
         reply_text=answer,
         should_ask_followup=False,
         followup_question=None,
         missing_fields=[],
-        collected_slots=session_state.slots,
-        referenced_schemes=schemes,
+        collected_slots=merged_slots,
+        referenced_schemes=scheme_cards,
+    )
+
+
+@router.get("/session/{session_id}/history", response_model=SessionHistoryResponse)
+def get_agent_session_history(
+    session_id: str,
+    limit: int = Query(30, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    session_row = db.query(AgentSession).filter(AgentSession.session_id == session_id).first()
+    if not session_row:
+        return SessionHistoryResponse(session_id=session_id, slots=SlotState(), turns=[])
+
+    turns = (
+        db.query(AgentTurn)
+        .filter(AgentTurn.session_id == session_id)
+        .order_by(AgentTurn.id.desc())
+        .limit(limit)
+        .all()
+    )
+    turns.reverse()
+
+    return SessionHistoryResponse(
+        session_id=session_id,
+        language_code=session_row.language_code,
+        slots=_load_slots_from_session(session_row),
+        turns=[
+            TurnHistoryItem(
+                role=t.role,
+                message_text=t.message_text,
+                meta=t.meta or {},
+                created_at=t.created_at.isoformat() if t.created_at else None,
+            )
+            for t in turns
+        ],
     )
 
 
 @router.delete("/session/{session_id}")
-def clear_agent_session(session_id: str):
-    SESSION_STORE.pop(session_id, None)
+def clear_agent_session(session_id: str, db: Session = Depends(get_db)):
+    db.query(AgentTurn).filter(AgentTurn.session_id == session_id).delete()
+    db.query(AgentSession).filter(AgentSession.session_id == session_id).delete()
+    db.commit()
     return {"status": "cleared", "session_id": session_id}

@@ -147,6 +147,23 @@ async def transcribe_audio_file(
 
     response_payload = lambda_response.get("Payload").read()
     lambda_data = _parse_lambda_payload(response_payload)
+    lambda_status = (lambda_data.get("status") or "").lower()
+
+    if lambda_status == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail=lambda_data.get("error_message")
+            or lambda_data.get("failure_reason")
+            or "Voice transcription failed.",
+        )
+    if lambda_status in {"accepted", "in_progress"}:
+        return {
+            "status": lambda_status,
+            "request_id": lambda_data.get("request_id"),
+            "transcription_job_name": lambda_data.get("transcription_job_name"),
+            "message": lambda_data.get("message"),
+            "s3_uri": s3_uri,
+        }
 
     transcript_text = (
         lambda_data.get("transcript_text")
@@ -164,10 +181,11 @@ async def transcribe_audio_file(
 
     return {
         "status": "completed",
+        "request_id": lambda_data.get("request_id"),
+        "completed_at": lambda_data.get("completed_at"),
         "s3_uri": s3_uri,
         "detected_language_code": detected_language,
         "transcript_text": transcript_text,
         "transcript_hindi": transcript_text,
         "transcript_english": english_text,
-        "lambda_result": lambda_data,
     }

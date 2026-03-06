@@ -139,7 +139,7 @@ def _wait_for_completion(job_name: str) -> dict:
         time.sleep(POLL_SECONDS)
 
 
-def lambda_handler(event, _context):
+def lambda_handler(event, context):
     bucket = event.get("bucket")
     key = event.get("key")
     language_code = event.get("language_code")
@@ -154,7 +154,13 @@ def lambda_handler(event, _context):
     if not bucket or not key:
         return {
             "statusCode": 400,
-            "body": json.dumps({"error": "Missing required 'bucket' or 'key' in event."}),
+            "body": json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": "MISSING_INPUT",
+                    "error_message": "Missing required 'bucket' or 'key' in event.",
+                }
+            ),
         }
 
     try:
@@ -166,7 +172,16 @@ def lambda_handler(event, _context):
             language_options=language_options,
         )
     except Exception as exc:
-        return {"statusCode": 500, "body": json.dumps({"error": f"Failed to start job: {exc}"})}
+        return {
+            "statusCode": 500,
+            "body": json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": "START_JOB_FAILED",
+                    "error_message": f"Failed to start job: {exc}",
+                }
+            ),
+        }
 
     if not wait_for_result:
         return {
@@ -175,6 +190,8 @@ def lambda_handler(event, _context):
                 {
                     "status": "accepted",
                     "message": "Transcription job started.",
+                    "request_id": context.aws_request_id if context else None,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "transcription_job_name": job_name,
                     "ignored_language_options": ignored_language_options,
                 }
@@ -190,6 +207,8 @@ def lambda_handler(event, _context):
                 {
                     "status": "in_progress",
                     "message": str(exc),
+                    "request_id": context.aws_request_id if context else None,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
                     "transcription_job_name": job_name,
                 }
             ),
@@ -197,7 +216,13 @@ def lambda_handler(event, _context):
     except Exception as exc:
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": f"Failed waiting for job completion: {exc}"}),
+            "body": json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": "WAIT_FAILED",
+                    "error_message": f"Failed waiting for job completion: {exc}",
+                }
+            ),
         }
 
     if job["TranscriptionJobStatus"] == "FAILED":
@@ -206,6 +231,7 @@ def lambda_handler(event, _context):
             "body": json.dumps(
                 {
                     "status": "failed",
+                    "error_code": "TRANSCRIBE_FAILED",
                     "transcription_job_name": job_name,
                     "failure_reason": job.get("FailureReason", "Unknown"),
                 }
@@ -219,7 +245,13 @@ def lambda_handler(event, _context):
     except Exception as exc:
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": f"Failed reading transcript JSON: {exc}"}),
+            "body": json.dumps(
+                {
+                    "status": "failed",
+                    "error_code": "READ_TRANSCRIPT_FAILED",
+                    "error_message": f"Failed reading transcript JSON: {exc}",
+                }
+            ),
         }
 
     return {
@@ -227,10 +259,11 @@ def lambda_handler(event, _context):
         "body": json.dumps(
             {
                 "status": "completed",
+                "request_id": context.aws_request_id if context else None,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
                 "transcription_job_name": job_name,
                 "transcript_text": transcript_text,
                 "detected_language_code": detected_language_code or "unknown",
-                "transcript_uri": transcript_uri,
                 "ignored_language_options": ignored_language_options,
             }
         ),
