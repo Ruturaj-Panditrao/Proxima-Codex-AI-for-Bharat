@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import schemes, chat, voice, ws_bridge
+from app.routers import schemes, chat, voice, voice_agent
 
 app = FastAPI(title="Bharat Schemes API")
 
@@ -15,7 +15,7 @@ app.add_middleware(
 app.include_router(schemes.router)
 app.include_router(chat.router)
 app.include_router(voice.router)
-app.include_router(ws_bridge.router)
+app.include_router(voice_agent.router)
 
 @app.get("/")
 def health_check():
