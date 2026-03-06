@@ -1,7 +1,6 @@
 import boto3
 import json
 import os
-import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -97,89 +96,3 @@ def generate_agent_response(user_query: str, retrieved_schemes: list):
     except Exception as e:
         print(f"Error generating agent response: {e}")
         return "I'm sorry, I am having trouble connecting to the AI brain right now."
-
-
-def analyze_turn_for_followup(user_text: str, history_turns: list, detected_language_code: str | None = None):
-    """
-    LLM decides if follow-up is needed and produces retrieval hints.
-    Returns a normalized dict:
-    {
-      should_follow_up: bool,
-      follow_up_question: str,
-      search_query: str,
-      state_filter: str | None,
-      slots: dict
-    }
-    """
-    fallback = {
-        "should_follow_up": False,
-        "follow_up_question": "",
-        "search_query": user_text,
-        "state_filter": None,
-        "slots": {},
-    }
-
-    compact_history = []
-    for t in history_turns[-8:]:
-        role = t.get("role", "unknown")
-        text = t.get("message_text", "")
-        compact_history.append({"role": role, "text": text})
-
-    system_prompt = (
-        "You are a conversation manager for an Indian welfare-schemes voice assistant.\n"
-        "You must decide if a follow-up question is required before searching schemes.\n"
-        "Rules:\n"
-        "1) Ask follow-up only when truly necessary to improve recommendation quality.\n"
-        "2) Ask at most one concise question.\n"
-        "3) If enough info exists, do not ask follow-up.\n"
-        "4) Return strict JSON only (no markdown).\n"
-        "JSON schema:\n"
-        "{\n"
-        "  \"should_follow_up\": boolean,\n"
-        "  \"follow_up_question\": string,\n"
-        "  \"search_query\": string,\n"
-        "  \"state_filter\": string|null,\n"
-        "  \"slots\": {\"state\": string|null, \"occupation\": string|null, \"age\": number|null, \"gender\": string|null, \"income_monthly\": number|null}\n"
-        "}\n"
-    )
-
-    user_payload = {
-        "detected_language_code": detected_language_code,
-        "history": compact_history,
-        "latest_user_text": user_text,
-    }
-
-    try:
-        response = bedrock.converse(
-            modelId="apac.amazon.nova-lite-v1:0",
-            messages=[{
-                "role": "user",
-                "content": [{"text": json.dumps(user_payload, ensure_ascii=False)}]
-            }],
-            system=[{"text": system_prompt}],
-            inferenceConfig={
-                "maxTokens": 500,
-                "temperature": 0.1
-            }
-        )
-
-        raw_text = response["output"]["message"]["content"][0]["text"]
-
-        match = re.search(r"\{.*\}", raw_text, flags=re.DOTALL)
-        if not match:
-            return fallback
-
-        parsed = json.loads(match.group(0))
-        if not isinstance(parsed, dict):
-            return fallback
-
-        return {
-            "should_follow_up": bool(parsed.get("should_follow_up", False)),
-            "follow_up_question": str(parsed.get("follow_up_question", "") or ""),
-            "search_query": str(parsed.get("search_query", "") or user_text),
-            "state_filter": parsed.get("state_filter"),
-            "slots": parsed.get("slots") if isinstance(parsed.get("slots"), dict) else {},
-        }
-    except Exception as e:
-        print(f"Error in analyze_turn_for_followup: {e}")
-        return fallback
