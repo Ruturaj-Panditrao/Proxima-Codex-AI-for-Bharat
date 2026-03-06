@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import logging
 from app.database import engine
 from app.models import AgentSession, AgentTurn
-from app.routers import schemes, chat, voice, voice_agent
+from app.routers import schemes, chat, voice
 
 app = FastAPI(title="Bharat Schemes API")
 
@@ -18,7 +18,6 @@ app.add_middleware(
 app.include_router(schemes.router)
 app.include_router(chat.router)
 app.include_router(voice.router)
-app.include_router(voice_agent.router)
 
 logger = logging.getLogger(__name__)
 
