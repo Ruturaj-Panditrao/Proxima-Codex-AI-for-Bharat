@@ -1,12 +1,46 @@
 import boto3
 import json
 import os
+from botocore.exceptions import BotoCoreError, ClientError
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # Initialize the Bedrock client
 bedrock = boto3.client('bedrock-runtime', region_name=os.getenv("AWS_DEFAULT_REGION", "ap-south-1"))
+polly = boto3.client("polly", region_name=os.getenv("AWS_DEFAULT_REGION", "ap-south-1")) 
+
+# Neural voices — best quality
+VOICE_MAP = {
+    "hi": "Kajal",      # Only neural Hindi voice, needs engine="neural"
+    "en": "Joanna",     # Neural English
+    "default": "Joanna",
+}
+
+def synthesize_speech(text: str, language_code: str | None = None) -> bytes:
+    """
+    Convert text to speech using Amazon Polly.
+    Returns raw MP3 bytes.
+    """
+    # Resolve language to voice
+    lang_prefix = (language_code or "en").split("-")[0].lower()  # "hi-IN" → "hi"
+    voice_id = VOICE_MAP.get(lang_prefix, VOICE_MAP["default"])
+
+    # Kajal only supports neural engine
+    engine = "neural" if voice_id == "Kajal" else "neural"
+
+    try:
+        response = polly.synthesize_speech(
+            Text=text,
+            OutputFormat="mp3",
+            VoiceId=voice_id,
+            Engine=engine,
+            LanguageCode=language_code or "en-US",
+        )
+        return response["AudioStream"].read()
+    except (BotoCoreError, ClientError) as e:
+        raise RuntimeError(f"Polly synthesis failed: {e}")
+
 
 def get_query_embedding(text: str):
     """Converts the user's spoken question into a 1024-dimension vector using Titan V2."""
