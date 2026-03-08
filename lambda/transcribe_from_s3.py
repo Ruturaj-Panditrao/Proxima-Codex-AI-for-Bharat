@@ -28,6 +28,32 @@ def _get_allowed_language_codes() -> set[str]:
 ALLOWED_LANGUAGE_CODES = _get_allowed_language_codes()
 
 
+def _as_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off", ""}:
+            return False
+        return default
+    return bool(value)
+
+
+def _normalize_language_options(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = [x.strip() for x in value.split(",")]
+        return [x for x in parts if x]
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return []
+
+
 def _guess_media_format(object_key: str) -> str:
     extension = object_key.rsplit(".", 1)[-1].lower() if "." in object_key else "wav"
     supported = {"mp3", "mp4", "wav", "flac", "ogg", "amr", "webm", "m4a"}
@@ -51,11 +77,33 @@ def _extract_transcript_and_language(transcript_json: dict) -> tuple[str, str]:
 
     detected_language_code = (results.get("language_code") or "").strip()
     if not detected_language_code:
+        # Some AWS outputs return language in "language_identifications"
+        # with score + code entries.
+        language_identifications = results.get("language_identifications", [])
+        if language_identifications and isinstance(language_identifications, list):
+            detected_language_code = (language_identifications[0].get("code") or "").strip()
+    if not detected_language_code:
         language_identification = results.get("language_identification", [])
         if language_identification and isinstance(language_identification, list):
             detected_language_code = (language_identification[0].get("code") or "").strip()
 
     return transcript_text, detected_language_code
+
+
+def _extract_language_from_job(job: dict) -> str:
+    if not isinstance(job, dict):
+        return ""
+
+    language_code = (job.get("LanguageCode") or "").strip()
+    if language_code:
+        return language_code
+
+    language_codes = job.get("LanguageCodes", [])
+    if isinstance(language_codes, list) and language_codes:
+        first = language_codes[0]
+        if isinstance(first, dict):
+            return (first.get("LanguageCode") or "").strip()
+    return ""
 
 
 def _start_transcription_job(
@@ -81,12 +129,12 @@ def _start_transcription_job(
 
     normalized_options = [code for code in (language_options or []) if code in ALLOWED_LANGUAGE_CODES]
 
-    if detect_multiple_languages:
+    if language_code and language_code in ALLOWED_LANGUAGE_CODES:
+        request["LanguageCode"] = language_code
+    elif detect_multiple_languages:
         request["IdentifyMultipleLanguages"] = True
         if normalized_options:
             request["LanguageOptions"] = normalized_options
-    elif language_code and language_code in ALLOWED_LANGUAGE_CODES:
-        request["LanguageCode"] = language_code
     else:
         # Fallback: detect dominant language if explicit mode was not requested.
         request["IdentifyLanguage"] = True
@@ -143,9 +191,9 @@ def lambda_handler(event, context):
     bucket = event.get("bucket")
     key = event.get("key")
     language_code = event.get("language_code")
-    detect_multiple_languages = bool(event.get("detect_multiple_languages", True))
-    language_options = event.get("language_options") or []
-    wait_for_result = bool(event.get("wait_for_result", True))
+    detect_multiple_languages = _as_bool(event.get("detect_multiple_languages"), True)
+    language_options = _normalize_language_options(event.get("language_options"))
+    wait_for_result = _as_bool(event.get("wait_for_result"), True)
 
     ignored_language_options = [code for code in language_options if code not in ALLOWED_LANGUAGE_CODES]
     if language_code and language_code not in ALLOWED_LANGUAGE_CODES:
@@ -242,6 +290,8 @@ def lambda_handler(event, context):
     try:
         transcript_json = _fetch_transcript_json(transcript_uri)
         transcript_text, detected_language_code = _extract_transcript_and_language(transcript_json)
+        if not detected_language_code:
+            detected_language_code = _extract_language_from_job(job)
     except Exception as exc:
         return {
             "statusCode": 500,
@@ -264,6 +314,7 @@ def lambda_handler(event, context):
                 "transcription_job_name": job_name,
                 "transcript_text": transcript_text,
                 "detected_language_code": detected_language_code or "unknown",
+                "detected_language": detected_language_code or "unknown",
                 "ignored_language_options": ignored_language_options,
             }
         ),

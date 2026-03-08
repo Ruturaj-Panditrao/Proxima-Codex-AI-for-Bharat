@@ -79,26 +79,28 @@ def _parse_lambda_payload(response_payload: bytes) -> dict:
     return body
 
 
-def translate_to_english(text: str) -> str:
+def translate_to_english(text: str) -> tuple[str, str]:
     if not text:
-        return ""
+        return "", ""
     try:
         response = translate_client.translate_text(
             Text=text,
             SourceLanguageCode="auto",
             TargetLanguageCode="en",
         )
-        return response["TranslatedText"]
+        translated = response.get("TranslatedText", "")
+        source = response.get("SourceLanguageCode", "")
+        return translated, source
     except Exception as exc:
         print("Translate error:", exc)
-        return text
+        return text, ""
 
 
 @router.post("/transcribe")
 async def transcribe_audio_file(
     file: UploadFile = File(...),
     language_code: str | None = Form(None),
-    detect_multiple_languages: bool = Form(True),
+    detect_multiple_languages: bool = Form(False),
     wait_for_result: bool = Form(True),
 ):
     if language_code and language_code not in SUPPORTED_LANGUAGE_CODES:
@@ -177,7 +179,22 @@ async def transcribe_audio_file(
         or lambda_data.get("language_code")
         or (language_code or "auto")
     )
-    english_text = translate_to_english(transcript_text) if transcript_text else ""
+    english_text, translate_source = translate_to_english(transcript_text) if transcript_text else ("", "")
+    if detected_language in {"unknown", "auto"} and translate_source:
+        # AWS Translate returns generic codes like "hi"/"mr"; normalize to Transcribe-style locale.
+        lang_map = {
+            "hi": "hi-IN",
+            "mr": "mr-IN",
+            "en": "en-US",
+            "ta": "ta-IN",
+            "te": "te-IN",
+            "ml": "ml-IN",
+            "kn": "kn-IN",
+            "bn": "bn-IN",
+            "gu": "gu-IN",
+            "pa": "pa-IN",
+        }
+        detected_language = lang_map.get(translate_source, detected_language)
 
     return {
         "status": "completed",
